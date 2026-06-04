@@ -1,3 +1,13 @@
-ultralytics==8.2.0
-easyocr==1.7.1
+# Основные зависимости ParkVision
+# Установка: pip install -r requirements.txt
+#
+# Важно: numpy должен быть <2 из-за совместимости с opencv и ultralytics.
+# Не обновляйте numpy до 2.x — это сломает cv2.
+
+numpy==1.26.4
 opencv-python==4.9.0.80
+ultralytics==8.1.0
+easyocr==1.7.1
+torch==2.12.0
+torchvision==0.27.0
+pandas==2.3.3
