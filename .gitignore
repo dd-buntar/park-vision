@@ -1,0 +1,23 @@
+venv/
+.venv/
+env/
+
+# Веса моделей
+models/*.pt
+models/*.onnx
+output/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# PyCharm
+.idea/
+
+# EasyOCR кэш
+.EasyOCR/
+
+.DS_Store
+Thumbs.db
