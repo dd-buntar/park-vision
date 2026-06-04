@@ -12,12 +12,9 @@ import numpy as np
 from ultralytics import YOLO
 
 
-# Индексы классов в модели
-#TODO Уточнить классы в документации весов модели
-CLASS_CAR = 0
-CLASS_PLATE = 1
+CLASS_FRONT_PLATE = 0  # n_p — передний номерной знак
+CLASS_REAR_PLATE = 1   # p_p — задний номерной знак
 
-# Минимальная уверенность модели для принятия детекции
 DEFAULT_CONFIDENCE = 0.45
 
 
@@ -93,19 +90,8 @@ class Detector:
         self.model.to(device)
 
     def detect(self, frame: np.ndarray) -> FrameDetections:
-        """
-        Запускает детекцию на одном кадре.
-
-        Args:
-            frame: кадр в формате BGR (numpy array, как из OpenCV)
-
-        Returns:
-            FrameDetections с отфильтрованными машинами и номерами.
-            Номера без машины отбрасываются.
-        """
         results = self.model(frame, conf=self.confidence, verbose=False)[0]
 
-        cars: list[Detection] = []
         plates: list[Detection] = []
 
         for box in results.boxes:
@@ -113,18 +99,11 @@ class Detector:
             confidence = float(box.conf[0])
             class_id = int(box.cls[0])
 
-            detection = Detection(x1, y1, x2, y2, confidence, class_id)
+            # Оба класса — это номера, берём все
+            if class_id in (CLASS_FRONT_PLATE, CLASS_REAR_PLATE):
+                plates.append(Detection(x1, y1, x2, y2, confidence, class_id))
 
-            if class_id == CLASS_CAR:
-                cars.append(detection)
-            elif class_id == CLASS_PLATE:
-                plates.append(detection)
-
-        # Оставляем только номера, которые находятся внутри рамки машины.
-        # Это убирает ложные срабатывания на вывески, таблички и т.д.
-        valid_plates = self._filter_plates(cars, plates)
-
-        return FrameDetections(cars=cars, plates=valid_plates)
+        return FrameDetections(cars=[], plates=plates)
 
     def _filter_plates(
         self,

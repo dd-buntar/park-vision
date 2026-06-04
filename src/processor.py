@@ -102,14 +102,20 @@ class Processor:
 
                 self._save_screenshot(annotated, frame_count)
 
-                cv2.imshow("ParkVision", annotated)
-                if cv2.waitKey(1) & 0xFF == ord("q"):
-                    self.logger.info("Остановлено пользователем.")
-                    break
+                try:
+                    cv2.imshow("ParkVision", annotated)
+                    if cv2.waitKey(1) & 0xFF == ord("q"):
+                        self.logger.info("Остановлено пользователем.")
+                        break
+                except cv2.error:
+                    pass  # headless-окружение, окно не поддерживается
 
         finally:
             cap.release()
-            cv2.destroyAllWindows()
+            try:
+                cv2.destroyAllWindows()
+            except cv2.error:
+                pass
             self.logger.info(
                 f"Обработка завершена. Кадров: {frame_count}, "
                 f"номеров найдено: {plates_found}."
