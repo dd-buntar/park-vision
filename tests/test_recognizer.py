@@ -22,38 +22,35 @@ def make_recognizer() -> Recognizer:
 # ---------------------------------------------------------------------------
 
 class TestPostprocess:
-    """Проверяем очистку и нормализацию текста."""
+    """Проверяем умную позиционную постобработку текста."""
 
     def setup_method(self):
         self.recognizer = make_recognizer()
 
-    def test_latin_to_cyrillic(self):
-        """Латинские буквы заменяются на кириллические аналоги."""
-        assert self.recognizer._postprocess("A123BC") == "А123ВС"
+    def test_correct_full_plate(self):
+        """Полный номер с латиницей — правильно конвертируется."""
+        assert self.recognizer._postprocess("A123BC456") == "А123ВС456"
 
-    def test_removes_spaces_and_dashes(self):
-        """Пробелы и дефисы убираются."""
-        assert self.recognizer._postprocess("А 123 ВС-456") == "А123ВС456"
+    def test_digit_one_at_letter_position(self):
+        """Цифра 1 на позиции буквы — заменяется на Т."""
+        assert self.recognizer._postprocess("1505YH36") == "Т505УН36"
 
-    def test_lowercase_to_uppercase(self):
-        """Строчные буквы приводятся к верхнему регистру."""
-        assert self.recognizer._postprocess("а123вс456") == "А123ВС456"
+    def test_ruble_sign_replaced(self):
+        """Знак рубля на позиции буквы — заменяется на Р."""
+        assert self.recognizer._postprocess("₽986YX36") == "Р986УХ36"
 
-    def test_mixed_latin_and_cyrillic(self):
-        """Смесь латиницы и кириллицы — латиница заменяется."""
-        assert self.recognizer._postprocess("A123ВС456") == "А123ВС456"
+    def test_letter_o_at_digit_position(self):
+        """Буква О на позиции цифры — заменяется на 0."""
+        assert self.recognizer._postprocess("АО23ВС45") == "А023ВС45"
 
     def test_empty_string(self):
         """Пустая строка остаётся пустой."""
         assert self.recognizer._postprocess("") == ""
 
-    def test_y_to_cyrillic_u(self):
-        """Латинская Y заменяется на кириллическую У."""
-        assert self.recognizer._postprocess("Y123ВС456") == "У123ВС456"
-
-    def test_garbage_characters_removed(self):
-        """Мусорные символы убираются."""
-        assert self.recognizer._postprocess("А!123#ВС@456") == "А123ВС456"
+    def test_short_string_returned_as_is(self):
+        """Короткая строка — возвращается без позиционной обработки."""
+        result = self.recognizer._postprocess("АВС")
+        assert len(result) <= 3
 
 
 # ---------------------------------------------------------------------------

@@ -10,6 +10,12 @@ main.py
     # Подключение к IP-камере по RTSP:
     python main.py --source rtsp://192.168.1.1:554/stream
 
+    # Одно изображение:
+    python main.py --source photo.jpg
+
+    # Папка с изображениями:
+    python main.py --folder images/
+
     # Указать другую папку для результатов:
     python main.py --source video.mp4 --output results/
 
@@ -22,7 +28,7 @@ import sys
 from pathlib import Path
 
 from src.detector import Detector
-from src.processor import Processor
+from src.processor import Processor, IMAGE_EXTENSIONS
 from src.recognizer import Recognizer
 from src.utils import setup_csv, setup_logger
 
@@ -46,8 +52,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--source",
         type=str,
-        required=True,
-        help="Источник видео: путь к файлу (.mp4, .avi, .mov) или RTSP-адрес камеры.",
+        default=None,
+        help=(
+            "Источник: путь к видеофайлу (.mp4, .avi, .mov), "
+            "изображению (.jpg, .png) или RTSP-адрес камеры."
+        ),
+    )
+    parser.add_argument(
+        "--folder",
+        type=str,
+        default=None,
+        help="Путь к папке с изображениями для пакетной обработки.",
     )
     parser.add_argument(
         "--model",
@@ -79,11 +94,21 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
+    # Проверяем что указан хотя бы один источник
+    if not args.source and not args.folder:
+        print("Ошибка: укажите --source или --folder.")
+        print("Пример: python main.py --source video.mp4")
+        print("        python main.py --folder images/")
+        sys.exit(1)
+
     # Настраиваем логирование
     logger = setup_logger(DEFAULT_LOG_DIR)
     logger.info("=" * 50)
     logger.info("ParkVision запущен")
-    logger.info(f"Источник: {args.source}")
+    if args.source:
+        logger.info(f"Источник: {args.source}")
+    if args.folder:
+        logger.info(f"Папка:    {args.folder}")
     logger.info(f"Модель:   {args.model}")
     logger.info(f"Устройство: {'CPU' if args.no_gpu else 'GPU'}")
     logger.info("=" * 50)
@@ -96,12 +121,6 @@ def main() -> None:
             "Скачайте веса и положите в папку models/.\n"
             "Инструкция: см. README.md, раздел 'Установка модели'."
         )
-        sys.exit(1)
-
-    # Проверяем источник — если это файл, он должен существовать
-    source = args.source
-    if not source.startswith("rtsp://") and not Path(source).exists():
-        logger.error(f"Видеофайл не найден: {source}")
         sys.exit(1)
 
     device = "cpu" if args.no_gpu else "cuda"
@@ -127,8 +146,32 @@ def main() -> None:
         logger=logger,
     )
 
-    # Запускаем обработку
-    processor.process(source)
+    # Запускаем нужный режим
+    if args.folder:
+        # Пакетная обработка папки с изображениями
+        folder_path = Path(args.folder)
+        if not folder_path.exists():
+            logger.error(f"Папка не найдена: {folder_path}")
+            sys.exit(1)
+        processor.process_folder(args.folder)
+
+    elif args.source:
+        source = args.source
+        source_path = Path(source)
+
+        if source_path.suffix.lower() in IMAGE_EXTENSIONS:
+            # Одно изображение
+            if not source_path.exists():
+                logger.error(f"Файл не найден: {source}")
+                sys.exit(1)
+            processor.process_image(source)
+
+        else:
+            # Видеофайл или RTSP-поток
+            if not source.startswith("rtsp://") and not source_path.exists():
+                logger.error(f"Файл не найден: {source}")
+                sys.exit(1)
+            processor.process(source)
 
 
 if __name__ == "__main__":

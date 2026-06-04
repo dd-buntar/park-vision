@@ -16,26 +16,47 @@ import numpy as np
 from src.detector import Detection
 
 
+# Разрешённые кириллические буквы в российских номерах
+# (только те, у которых есть графический аналог в латинице)
 ALLOWED_CHARS = "АВЕКМНОРСТУХ"
 
+# Regex-шаблон российского номера: А123ВС456 или А123ВС45
 RU_PLATE_PATTERN = re.compile(
     rf"^[{ALLOWED_CHARS}]{{1}}\d{{3}}[{ALLOWED_CHARS}]{{2}}\d{{2,3}}$"
 )
 
-CHAR_SUBSTITUTIONS = {
+# Замены для позиций где должна быть БУКВА.
+# Цифры и латиница → кириллица.
+LETTER_SUBSTITUTIONS = {
+    # Латиница → кириллица
     "A": "А", "B": "В", "E": "Е", "K": "К",
     "M": "М", "H": "Н", "O": "О", "P": "Р",
-    "C": "С", "T": "Т", "Y": "У", "X": "Х"
+    "C": "С", "T": "Т", "Y": "У", "X": "Х",
+    # Цифры → похожие буквы
+    "0": "О", "1": "Т", "3": "З", "4": "А",
+    "6": "Б", "8": "В",
+    # Знак рубля → Р
+    "₽": "Р",
+}
+
+# Замены для позиций где должна быть ЦИФРА.
+# Буквы → похожие цифры.
+DIGIT_SUBSTITUTIONS = {
+    # Кириллица → цифры
+    "О": "0", "З": "3", "А": "4", "В": "8",
+    # Латиница → цифры
+    "O": "0", "Z": "3", "B": "8", "S": "5",
+    "I": "1", "L": "1", "G": "6", "T": "7",
 }
 
 
 @dataclass
 class RecognitionResult:
     """Результат распознавания одного номерного знака."""
-    raw_text: str
-    plate_text: str
-    is_valid: bool
-    confidence: float
+    raw_text: str        # текст как вернул EasyOCR, до обработки
+    plate_text: str      # текст после очистки и замен
+    is_valid: bool       # соответствует ли формату российского номера
+    confidence: float    # средняя уверенность EasyOCR (0.0 — 1.0)
 
 
 class Recognizer:
@@ -142,6 +163,7 @@ class Recognizer:
         Returns:
             Обработанное изображение.
         """
+        # Увеличиваем — маленькие номера OCR читает хуже
         plate_img = cv2.resize(
             plate_img,
             None,
@@ -150,8 +172,11 @@ class Recognizer:
             interpolation=cv2.INTER_CUBIC,
         )
 
+        # Переводим в оттенки серого
         gray = cv2.cvtColor(plate_img, cv2.COLOR_BGR2GRAY)
 
+        # CLAHE — адаптивное выравнивание гистограммы.
+        # Улучшает читаемость при неравномерном освещении.
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         enhanced = clahe.apply(gray)
 
@@ -187,10 +212,11 @@ class Recognizer:
         """
         Очищает и нормализует распознанный текст.
 
-        Шаги:
-        1. Убираем пробелы, дефисы и прочий мусор
-        2. Приводим к верхнему регистру
-        3. Заменяем визуально похожие символы на кириллицу
+        Применяет умную позиционную постобработку — разные таблицы замен
+        для букв и цифр в зависимости от позиции в номере.
+
+        Структура российского номера: Б 999 ББ 999
+        Позиции: 0=буква, 1-3=цифры, 4-5=буквы, 6-8=цифры региона
 
         Args:
             text: сырой текст от EasyOCR
@@ -198,11 +224,29 @@ class Recognizer:
         Returns:
             Нормализованная строка.
         """
-        text = re.sub(r"[^А-ЯA-Z0-9а-яa-z]", "", text)
+        # Убираем всё кроме букв, цифр и знака рубля (₽ путают с Р)
+        text = re.sub(r"[^А-ЯA-Z0-9а-яa-zЁё₽]", "", text)
+
+        # Приводим к верхнему регистру
         text = text.upper()
 
+        # Если строка слишком короткая — возвращаем как есть
+        if len(text) < 6:
+            return text
+
+        # Позиции букв и цифр в российском номере
+        # Б 9 9 9 Б Б 9 9 [9]
+        # 0 1 2 3 4 5 6 7 [8]
+        LETTER_POSITIONS = {0, 4, 5}
+        DIGIT_POSITIONS  = {1, 2, 3, 6, 7, 8}
+
         result = ""
-        for char in text:
-            result += CHAR_SUBSTITUTIONS.get(char, char)
+        for i, char in enumerate(text):
+            if i in LETTER_POSITIONS:
+                result += LETTER_SUBSTITUTIONS.get(char, char)
+            elif i in DIGIT_POSITIONS:
+                result += DIGIT_SUBSTITUTIONS.get(char, char)
+            else:
+                result += char
 
         return result
