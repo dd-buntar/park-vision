@@ -5,6 +5,7 @@ env/
 # Веса моделей
 models/*.onnx
 output/
+testvideos/
 
 # Python
 __pycache__/
