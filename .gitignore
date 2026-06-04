@@ -3,7 +3,6 @@ venv/
 env/
 
 # Веса моделей
-models/*.pt
 models/*.onnx
 output/
 
