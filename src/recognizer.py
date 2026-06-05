@@ -2,87 +2,131 @@
 recognizer.py
 -------------
 Модуль распознавания текста с номерных знаков.
-Использует EasyOCR для извлечения символов и валидирует
-результат по формату российского номера.
+Использует LPRNet — специализированную нейросеть для номерных знаков.
+Значительно точнее EasyOCR для этой задачи.
 """
 
 import re
 from dataclasses import dataclass
+from pathlib import Path
 
 import cv2
-import easyocr
 import numpy as np
+import torch
 
 from src.detector import Detection
+from src.lprnet.lprnet_model import LPRNet
+from src.lprnet.stn_model import SpatialTransformer
+from src.lprnet.decoder import GreedyDecoder
 
+
+# Символы которые знает модель (латиница + цифры)
+# Последний символ '-' — blank для CTC декодера
+CHARS = [
+    '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
+    'A', 'B', 'E', 'K', 'M', 'H', 'O', 'P', 'C', 'T',
+    'Y', 'X', '-'
+]
+
+# Параметры LPRNet
+LPR_MAX_LEN = 9
+OUT_INDICES = (2, 6, 13, 22)
+DROPOUT = 0.0
+
+# Входной размер изображения для LPRNet
+INPUT_SIZE = (94, 24)  # ширина x высота
+
+# Замена латиницы на кириллицу для российских номеров
+LATIN_TO_CYRILLIC = {
+    'A': 'А', 'B': 'В', 'E': 'Е', 'K': 'К',
+    'M': 'М', 'H': 'Н', 'O': 'О', 'P': 'Р',
+    'C': 'С', 'T': 'Т', 'Y': 'У', 'X': 'Х',
+}
 
 # Разрешённые кириллические буквы в российских номерах
-# (только те, у которых есть графический аналог в латинице)
 ALLOWED_CHARS = "АВЕКМНОРСТУХ"
 
-# Regex-шаблон российского номера: А123ВС456 или А123ВС45
+# Regex-шаблон российского номера
 RU_PLATE_PATTERN = re.compile(
-    rf"^[{ALLOWED_CHARS}]{{1}}\d{{3}}[{ALLOWED_CHARS}]{{2}}\d{{2,3}}$"
+    rf"^[{ALLOWED_CHARS}]{{1}}\d{{3}}[{ALLOWED_CHARS}]{{2}}(\d{{2,3}})?$"
 )
-
-# Замены для позиций где должна быть БУКВА.
-# Цифры и латиница → кириллица.
-LETTER_SUBSTITUTIONS = {
-    # Латиница → кириллица
-    "A": "А", "B": "В", "E": "Е", "K": "К",
-    "M": "М", "H": "Н", "O": "О", "P": "Р",
-    "C": "С", "T": "Т", "Y": "У", "X": "Х",
-    # Цифры → похожие буквы
-    "0": "О", "1": "Т", "3": "З", "4": "А",
-    "6": "Б", "8": "В",
-    # Знак рубля → Р
-    "₽": "Р", "I": "Т", "7": "Т", "J": "Т", "Д": "Д",  # оставляем — валидация всё равно отклонит
-}
-
-# Замены для позиций где должна быть ЦИФРА.
-# Буквы → похожие цифры.
-DIGIT_SUBSTITUTIONS = {
-    # Кириллица → цифры
-    "О": "0", "З": "3", "А": "4", "В": "8",
-    # Латиница → цифры
-    "O": "0", "Z": "3", "B": "8", "S": "5",
-    "I": "1", "L": "1", "G": "6", "T": "7",
-}
 
 
 @dataclass
 class RecognitionResult:
     """Результат распознавания одного номерного знака."""
-    raw_text: str        # текст как вернул EasyOCR, до обработки
-    plate_text: str      # текст после очистки и замен
+    raw_text: str        # текст как вернул LPRNet (латиница)
+    plate_text: str      # текст после конвертации в кириллицу
     is_valid: bool       # соответствует ли формату российского номера
-    confidence: float    # средняя уверенность EasyOCR (0.0 — 1.0)
+    confidence: float    # уверенность (0.0 — 1.0)
 
 
 class Recognizer:
     """
-    Обёртка над EasyOCR для распознавания российских номерных знаков.
+    Обёртка над LPRNet для распознавания российских номерных знаков.
 
     Пример использования:
-        recognizer = Recognizer()
+        recognizer = Recognizer(
+            lprnet_weights="models/LPRNet_Ep_BEST_model.ckpt",
+            stn_weights="models/SpatialTransformer_Ep_BEST_model.ckpt",
+        )
         result = recognizer.recognize(frame, plate_detection)
-        if result.is_valid:
+        if result and result.is_valid:
             print(result.plate_text)
     """
 
-    def __init__(self, gpu: bool = True) -> None:
+    def __init__(
+        self,
+        lprnet_weights: str | Path = "models/LPRNet_Ep_BEST_model.ckpt",
+        stn_weights: str | Path = "models/SpatialTransformer_Ep_BEST_model.ckpt",
+        gpu: bool = True,
+    ) -> None:
         """
         Args:
-            gpu: использовать ли GPU для распознавания.
-                 Передайте False если GPU недоступен.
+            lprnet_weights: путь к весам LPRNet
+            stn_weights: путь к весам SpatialTransformer
+            gpu: использовать ли GPU
         """
-        # EasyOCR при первом запуске скачивает языковые модели (~100MB).
-        # Последующие запуски используют кэш.
-        self.reader = easyocr.Reader(
-            lang_list=["ru", "en"],
-            gpu=gpu,
-            verbose=False,
+        self.device = torch.device("cuda:0" if gpu and torch.cuda.is_available() else "cpu")
+        self.decoder = GreedyDecoder()
+
+        # Загружаем SpatialTransformer
+        stn_weights = Path(stn_weights)
+        if not stn_weights.exists():
+            raise FileNotFoundError(
+                f"Веса STN не найдены: {stn_weights}\n"
+                "Скачайте файл SpatialTransformer_Ep_BEST_model.ckpt в папку models/."
+            )
+        self.stn = SpatialTransformer()
+        self._load_weights(self.stn, stn_weights)
+        self.stn.to(self.device)
+        self.stn.eval()
+
+        # Загружаем LPRNet
+        lprnet_weights = Path(lprnet_weights)
+        if not lprnet_weights.exists():
+            raise FileNotFoundError(
+                f"Веса LPRNet не найдены: {lprnet_weights}\n"
+                "Скачайте файл LPRNet_Ep_BEST_model.ckpt в папку models/."
+            )
+        self.lprnet = LPRNet(
+            class_num=len(CHARS),
+            dropout_prob=DROPOUT,
+            out_indices=OUT_INDICES,
         )
+        self._load_weights(self.lprnet, lprnet_weights)
+        self.lprnet.to(self.device)
+        self.lprnet.eval()
+
+    def _load_weights(self, model: torch.nn.Module, weights_path: Path) -> None:
+        """Загружает веса модели из файла .ckpt."""
+        checkpoint = torch.load(str(weights_path), map_location=self.device)
+        # Веса могут быть сохранены напрямую или в обёртке с ключом net_state_dict
+        if isinstance(checkpoint, dict) and "net_state_dict" in checkpoint:
+            state_dict = checkpoint["net_state_dict"]
+        else:
+            state_dict = checkpoint
+        model.load_state_dict(state_dict)
 
     def recognize(
         self,
@@ -93,7 +137,7 @@ class Recognizer:
         Распознаёт текст номерного знака на кадре.
 
         Args:
-            frame: полный кадр в формате BGR (numpy array)
+            frame: полный кадр в формате BGR
             plate: детекция номерного знака с координатами
 
         Returns:
@@ -103,20 +147,24 @@ class Recognizer:
         if plate_img is None:
             return None
 
-        plate_img = self._preprocess(plate_img)
-        ocr_results = self.reader.readtext(plate_img)
+        tensor = self._preprocess(plate_img)
 
-        if not ocr_results:
-            return RecognitionResult(
-                raw_text="",
-                plate_text="",
-                is_valid=False,
-                confidence=0.0,
-            )
+        with torch.no_grad():
+            # Пропускаем через STN для выравнивания перспективы
+            tensor = self.stn(tensor)
+            # Распознаём символы
+            output = self.lprnet(tensor)
 
-        raw_text, confidence = self._merge_ocr_results(ocr_results)
-        plate_text = self._postprocess(raw_text)
+        preds = output.cpu().detach().numpy()
+        labels, _ = self.decoder.decode(preds, CHARS)
+
+        if not labels:
+            return None
+
+        raw_text = labels[0]
+        plate_text = self._to_cyrillic(raw_text)
         is_valid = bool(RU_PLATE_PATTERN.match(plate_text))
+        confidence = self._estimate_confidence(preds[0])
 
         return RecognitionResult(
             raw_text=raw_text,
@@ -130,18 +178,8 @@ class Recognizer:
         frame: np.ndarray,
         plate: Detection,
     ) -> np.ndarray | None:
-        """
-        Вырезает область номерного знака из кадра.
-
-        Args:
-            frame: полный кадр
-            plate: детекция с координатами рамки
-
-        Returns:
-            Вырезанное изображение или None если координаты некорректны.
-        """
+        """Вырезает область номерного знака из кадра."""
         h, w = frame.shape[:2]
-
         x1 = max(0, plate.x1)
         y1 = max(0, plate.y1)
         x2 = min(w, plate.x2)
@@ -152,82 +190,38 @@ class Recognizer:
 
         return frame[y1:y2, x1:x2]
 
-    def _preprocess(self, plate_img: np.ndarray) -> np.ndarray:
+    def _preprocess(self, plate_img: np.ndarray) -> torch.Tensor:
         """
-        Подготавливает изображение номера перед подачей в OCR.
-        Увеличивает, переводит в серый и улучшает контраст.
+        Подготавливает изображение номера для LPRNet.
+        Масштабирует до 94x24, нормализует и переводит в тензор.
+        """
+        img = cv2.resize(plate_img, INPUT_SIZE)
+        img = img.astype(np.float32)
+        img -= 127.5
+        img *= 0.0078125
+        img = np.transpose(img, (2, 0, 1))
+        tensor = torch.from_numpy(img).unsqueeze(0)
+        return tensor.to(self.device)
+
+    def _to_cyrillic(self, text: str) -> str:
+        """
+        Конвертирует латинские буквы в кириллицу.
+        LPRNet возвращает латиницу, нам нужна кириллица.
+        """
+        return "".join(LATIN_TO_CYRILLIC.get(c, c) for c in text)
+
+    def _estimate_confidence(self, preds: np.ndarray) -> float:
+        """
+        Оценивает уверенность распознавания.
+        Берём среднее максимальных вероятностей по всем позициям.
 
         Args:
-            plate_img: вырезанное изображение номерного знака
+            preds: выход LPRNet shape [len(CHARS), seq_len]
 
         Returns:
-            Обработанное изображение.
+            Уверенность от 0.0 до 1.0
         """
-        # Увеличиваем — маленькие номера OCR читает хуже
-        plate_img = cv2.resize(
-            plate_img,
-            None,
-            fx=2.0,
-            fy=2.0,
-            interpolation=cv2.INTER_CUBIC,
-        )
-
-        # Переводим в оттенки серого
-        gray = cv2.cvtColor(plate_img, cv2.COLOR_BGR2GRAY)
-
-        # CLAHE — адаптивное выравнивание гистограммы.
-        # Улучшает читаемость при неравномерном освещении.
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        enhanced = clahe.apply(gray)
-
-        return enhanced
-
-    def _merge_ocr_results(
-        self,
-        ocr_results: list,
-    ) -> tuple[str, float]:
-        """
-        Объединяет несколько текстовых блоков от EasyOCR в одну строку.
-        EasyOCR может разбить номер на несколько частей.
-
-        Args:
-            ocr_results: список результатов от reader.readtext()
-
-        Returns:
-            Кортеж (объединённый текст, средняя уверенность).
-        """
-        texts = []
-        confidences = []
-
-        for _, text, confidence in ocr_results:
-            texts.append(text.strip())
-            confidences.append(confidence)
-
-        merged = "".join(texts)
-        avg_confidence = sum(confidences) / len(confidences)
-
-        return merged, avg_confidence
-
-    def _postprocess(self, text: str) -> str:
-        text = re.sub(r"[^А-ЯA-Z0-9а-яa-zЁё₽]", "", text)
-        text = text.upper()
-
-        if len(text) < 6:
-            return text
-
-        LETTER_POSITIONS = {0, 4, 5}
-        DIGIT_POSITIONS = {1, 2, 3, 6, 7, 8}
-
-        result = ""
-        for i, char in enumerate(text):
-            if i in LETTER_POSITIONS:
-                mapped = LETTER_SUBSTITUTIONS.get(char, char)
-                result += mapped
-            elif i in DIGIT_POSITIONS:
-                result += DIGIT_SUBSTITUTIONS.get(char, char)
-            else:
-                result += char
-
-        # Российский номер максимум 9 символов (А123ВС456)
-        # Всё лишнее — мусор от рекламных рамок и наклеек
-        return result[:9]
+        exp_preds = np.exp(preds - np.max(preds, axis=0, keepdims=True))
+        probs = exp_preds / exp_preds.sum(axis=0, keepdims=True)
+        max_probs = np.max(probs, axis=0)
+        return float(np.mean(max_probs))
