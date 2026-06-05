@@ -134,7 +134,11 @@ def main() -> None:
     )
 
     logger.info("Загрузка модели распознавания...")
-    recognizer = Recognizer(gpu=not args.no_gpu)
+    recognizer = Recognizer(
+        lprnet_weights="models/LPRNet_Ep_BEST_model.ckpt",
+        stn_weights="models/SpatialTransformer_Ep_BEST_model.ckpt",
+        gpu=not args.no_gpu,
+    )
 
     csv_path = setup_csv("output/logs")
 
