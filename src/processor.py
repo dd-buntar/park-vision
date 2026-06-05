@@ -5,6 +5,8 @@ processor.py
 Читает кадры из файла, RTSP-потока или папки с изображениями,
 запускает детекцию и распознавание, рисует результаты на кадре,
 сохраняет скриншоты и пишет CSV-лог.
+
+Для корректного отображения кириллицы используется PIL вместо cv2.putText.
 """
 
 import logging
@@ -12,6 +14,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+from PIL import Image, ImageDraw, ImageFont
 
 from src.detector import Detector, FrameDetections, Detection
 from src.recognizer import Recognizer, RecognitionResult
@@ -26,11 +29,32 @@ COLOR_TEXT = (255, 255, 255) # белый — текст
 MIN_CONFIDENCE_TO_LOG = 0.5
 
 # Каждый N-й кадр подаётся на детекцию (остальные пропускаются).
-# Это снижает нагрузку на GPU без заметной потери качества.
 DETECTION_EVERY_N_FRAMES = 3
 
 # Поддерживаемые форматы изображений
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff"}
+
+# Размер шрифта для подписей
+FONT_SIZE = 18
+
+# Шрифты которые пробуем загрузить по очереди (Windows/Linux)
+FONT_CANDIDATES = [
+    "arial.ttf",
+    "Arial.ttf",
+    "C:/Windows/Fonts/arial.ttf",
+    "C:/Windows/Fonts/Arial.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+]
+
+
+def _load_font(size: int = FONT_SIZE) -> ImageFont.FreeTypeFont:
+    """Загружает шрифт поддерживающий кириллицу."""
+    for font_path in FONT_CANDIDATES:
+        try:
+            return ImageFont.truetype(font_path, size)
+        except (IOError, OSError):
+            continue
+    return ImageFont.load_default()
 
 
 class Processor:
@@ -76,6 +100,7 @@ class Processor:
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.logger = logger or logging.getLogger("parkvision")
+        self.font = _load_font()
 
     def process(self, source: str) -> None:
         """
@@ -104,7 +129,6 @@ class Processor:
 
                 frame_count += 1
 
-                # Пропускаем кадры для снижения нагрузки
                 if frame_count % DETECTION_EVERY_N_FRAMES != 0:
                     continue
 
@@ -117,14 +141,13 @@ class Processor:
                 plates_found += len(detections.plates)
                 self._save_screenshot(annotated, frame_count)
 
-                # Показываем окно с результатом (можно закрыть клавишей Q)
                 try:
                     cv2.imshow("ParkVision", annotated)
                     if cv2.waitKey(1) & 0xFF == ord("q"):
                         self.logger.info("Остановлено пользователем.")
                         break
                 except cv2.error:
-                    pass  # headless-окружение, окно не поддерживается
+                    pass
 
         finally:
             cap.release()
@@ -159,7 +182,6 @@ class Processor:
 
         annotated = self._annotate_frame(frame, detections, str(image_path))
 
-        # Используем имя файла как номер кадра для уникальности скриншота
         stem = image_path.stem
         frame_number = int(stem) if stem.isdigit() else abs(hash(stem)) % 999999
         self._save_screenshot(annotated, frame_number)
@@ -179,7 +201,6 @@ class Processor:
             self.logger.error(f"Папка не найдена: {folder_path}")
             return
 
-        # Собираем все изображения из папки, сортируем по имени
         images = [
             f for f in sorted(folder_path.iterdir())
             if f.suffix.lower() in IMAGE_EXTENSIONS
@@ -196,7 +217,6 @@ class Processor:
 
         for i, image_path in enumerate(images, start=1):
             self.process_image(image_path)
-            # Прогресс каждые 10 изображений
             if i % 10 == 0:
                 self.logger.info(f"Прогресс: {i}/{len(images)}")
 
@@ -222,12 +242,12 @@ class Processor:
         annotated = frame.copy()
 
         for car in detections.cars:
-            self._draw_box(annotated, car, COLOR_CAR, "car")
+            annotated = self._draw_box(annotated, car, COLOR_CAR, "car")
 
         for plate in detections.plates:
             result = self.recognizer.recognize(frame, plate)
             label = self._build_label(result)
-            self._draw_box(annotated, plate, COLOR_PLATE, label)
+            annotated = self._draw_box(annotated, plate, COLOR_PLATE, label)
 
             if (
                 result is not None
@@ -253,16 +273,21 @@ class Processor:
         detection: Detection,
         color: tuple[int, int, int],
         label: str,
-    ) -> None:
+    ) -> np.ndarray:
         """
         Рисует прямоугольник и подпись на кадре.
+        Использует PIL для текста чтобы корректно отображать кириллицу.
 
         Args:
-            frame: кадр (изменяется на месте)
+            frame: кадр в формате BGR
             detection: детекция с координатами рамки
             color: цвет рамки в формате BGR
             label: текст подписи
+
+        Returns:
+            Кадр с нанесёнными аннотациями.
         """
+        # Рисуем рамку через OpenCV
         cv2.rectangle(
             frame,
             (detection.x1, detection.y1),
@@ -271,26 +296,35 @@ class Processor:
             thickness=2,
         )
 
-        (text_w, text_h), _ = cv2.getTextSize(
-            label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2
-        )
-        cv2.rectangle(
-            frame,
-            (detection.x1, detection.y1 - text_h - 8),
-            (detection.x1 + text_w + 4, detection.y1),
-            color,
-            thickness=-1,
+        # Переводим в PIL для отрисовки текста с кириллицей
+        img_pil = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        draw = ImageDraw.Draw(img_pil)
+
+        # Размер текста для фона под подпись
+        bbox = draw.textbbox((0, 0), label, font=self.font)
+        text_w = bbox[2] - bbox[0]
+        text_h = bbox[3] - bbox[1]
+        padding = 4
+
+        # Фон под текст — того же цвета что рамка
+        # PIL использует RGB, переворачиваем BGR
+        rgb_color = (color[2], color[1], color[0])
+        bg_x1 = detection.x1
+        bg_y1 = max(0, detection.y1 - text_h - padding * 2)
+        bg_x2 = detection.x1 + text_w + padding * 2
+        bg_y2 = detection.y1
+        draw.rectangle([bg_x1, bg_y1, bg_x2, bg_y2], fill=rgb_color)
+
+        # Текст поверх фона
+        draw.text(
+            (detection.x1 + padding, bg_y1 + padding // 2),
+            label,
+            font=self.font,
+            fill=(255, 255, 255),  # белый
         )
 
-        cv2.putText(
-            frame,
-            label,
-            (detection.x1 + 2, detection.y1 - 4),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
-            COLOR_TEXT,
-            thickness=2,
-        )
+        # Переводим обратно в BGR для OpenCV
+        return cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
 
     def _build_label(self, result: RecognitionResult | None) -> str:
         """
