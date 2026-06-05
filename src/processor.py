@@ -2,9 +2,12 @@
 processor.py
 ------------
 Основной модуль обработки видеопотока, изображений и папок.
-Читает кадры из файла, RTSP-потока или папки с изображениями,
-запускает детекцию и распознавание, рисует результаты на кадре,
-сохраняет скриншоты и пишет CSV-лог.
+
+Два режима работы:
+- По умолчанию: сохраняет только уникальные номера (один скриншот на номер,
+  одна запись в CSV). Удобно для демонстрации и реального использования.
+- Режим --save-all: сохраняет скриншот и пишет в CSV на каждый кадр с номером.
+  Удобно для отладки и анализа качества распознавания.
 
 Для корректного отображения кириллицы используется PIL вместо cv2.putText.
 """
@@ -59,20 +62,19 @@ def _load_font(size: int = FONT_SIZE) -> ImageFont.FreeTypeFont:
 
 class Processor:
     """
-    Обрабатывает видеопоток, одиночные изображения и папки с изображениями:
-    детектирует номера, распознаёт текст, визуализирует и логирует результаты.
+    Обрабатывает видеопоток, одиночные изображения и папки с изображениями.
 
     Пример использования:
         processor = Processor(detector, recognizer, csv_path, output_dir)
 
-        # Видеофайл:
+        # Видеофайл (только уникальные номера):
         processor.process("video.mp4")
+
+        # Видеофайл (все кадры):
+        processor.process("video.mp4", save_all=True)
 
         # RTSP-поток:
         processor.process("rtsp://192.168.1.1:554/stream")
-
-        # Одно изображение:
-        processor.process_image("photo.jpg")
 
         # Папка с изображениями:
         processor.process_folder("images/")
@@ -84,6 +86,7 @@ class Processor:
         recognizer: Recognizer,
         csv_path: str | Path,
         output_dir: str | Path,
+        save_all: bool = False,
         logger: logging.Logger | None = None,
     ) -> None:
         """
@@ -92,6 +95,8 @@ class Processor:
             recognizer: инициализированный модуль распознавания
             csv_path: путь к CSV-файлу для записи номеров
             output_dir: папка для сохранения скриншотов
+            save_all: если True — сохраняет каждый кадр с номером.
+                      если False — сохраняет только уникальные номера.
             logger: логгер (если None — создаётся стандартный)
         """
         self.detector = detector
@@ -99,8 +104,12 @@ class Processor:
         self.csv_path = Path(csv_path)
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.save_all = save_all
         self.logger = logger or logging.getLogger("parkvision")
         self.font = _load_font()
+
+        # Множество уже сохранённых номеров — для дедупликации
+        self._seen_plates: set[str] = set()
 
     def process(self, source: str) -> None:
         """
@@ -116,6 +125,11 @@ class Processor:
             return
 
         self.logger.info(f"Запуск обработки: {source}")
+        if self.save_all:
+            self.logger.info("Режим: сохранение всех кадров (--save-all)")
+        else:
+            self.logger.info("Режим: только уникальные номера")
+
         frame_count = 0
         plates_found = 0
 
@@ -137,9 +151,10 @@ class Processor:
                 if not detections.plates:
                     continue
 
-                annotated = self._annotate_frame(frame, detections, source)
-                plates_found += len(detections.plates)
-                self._save_screenshot(annotated, frame_count)
+                annotated, new_plates = self._annotate_frame(
+                    frame, detections, source, frame_count
+                )
+                plates_found += new_plates
 
                 try:
                     cv2.imshow("ParkVision", annotated)
@@ -157,7 +172,7 @@ class Processor:
                 pass
             self.logger.info(
                 f"Обработка завершена. Кадров: {frame_count}, "
-                f"номеров найдено: {plates_found}."
+                f"уникальных номеров: {len(self._seen_plates)}."
             )
 
     def process_image(self, image_path: str | Path) -> None:
@@ -180,11 +195,12 @@ class Processor:
             self.logger.debug(f"Номера не найдены: {image_path.name}")
             return
 
-        annotated = self._annotate_frame(frame, detections, str(image_path))
-
         stem = image_path.stem
         frame_number = int(stem) if stem.isdigit() else abs(hash(stem)) % 999999
-        self._save_screenshot(annotated, frame_number)
+
+        annotated, _ = self._annotate_frame(
+            frame, detections, str(image_path), frame_number
+        )
 
         self.logger.debug(f"Обработано: {image_path.name}")
 
@@ -220,14 +236,18 @@ class Processor:
             if i % 10 == 0:
                 self.logger.info(f"Прогресс: {i}/{len(images)}")
 
-        self.logger.info(f"Готово. Обработано {len(images)} изображений.")
+        self.logger.info(
+            f"Готово. Обработано {len(images)} изображений, "
+            f"уникальных номеров: {len(self._seen_plates)}."
+        )
 
     def _annotate_frame(
         self,
         frame: np.ndarray,
         detections: FrameDetections,
         source: str,
-    ) -> np.ndarray:
+        frame_number: int,
+    ) -> tuple[np.ndarray, int]:
         """
         Рисует рамки и подписи на кадре, пишет номера в CSV.
 
@@ -235,11 +255,14 @@ class Processor:
             frame: исходный кадр
             detections: результаты детекции
             source: источник (для записи в CSV)
+            frame_number: номер кадра (для имени файла скриншота)
 
         Returns:
-            Кадр с нанесёнными аннотациями.
+            Кортеж (аннотированный кадр, количество новых уникальных номеров).
         """
         annotated = frame.copy()
+        new_plates = 0
+        should_save_screenshot = False
 
         for car in detections.cars:
             annotated = self._draw_box(annotated, car, COLOR_CAR, "car")
@@ -254,18 +277,36 @@ class Processor:
                 and result.is_valid
                 and result.confidence >= MIN_CONFIDENCE_TO_LOG
             ):
-                write_plate(
-                    csv_path=self.csv_path,
-                    plate_text=result.plate_text,
-                    confidence=result.confidence,
-                    source=source,
-                )
-                self.logger.info(
-                    f"Номер: {result.plate_text} "
-                    f"(уверенность: {result.confidence:.0%})"
-                )
+                is_new = result.plate_text not in self._seen_plates
 
-        return annotated
+                if self.save_all:
+                    # Режим save-all — пишем всегда
+                    self._log_plate(result, source)
+                    should_save_screenshot = True
+                elif is_new:
+                    # Режим по умолчанию — только новые номера
+                    self._seen_plates.add(result.plate_text)
+                    self._log_plate(result, source)
+                    should_save_screenshot = True
+                    new_plates += 1
+
+        if should_save_screenshot:
+            self._save_screenshot(annotated, frame_number)
+
+        return annotated, new_plates
+
+    def _log_plate(self, result: RecognitionResult, source: str) -> None:
+        """Записывает номер в CSV и выводит в лог."""
+        write_plate(
+            csv_path=self.csv_path,
+            plate_text=result.plate_text,
+            confidence=result.confidence,
+            source=source,
+        )
+        self.logger.info(
+            f"Номер: {result.plate_text} "
+            f"(уверенность: {result.confidence:.0%})"
+        )
 
     def _draw_box(
         self,
@@ -287,7 +328,6 @@ class Processor:
         Returns:
             Кадр с нанесёнными аннотациями.
         """
-        # Рисуем рамку через OpenCV
         cv2.rectangle(
             frame,
             (detection.x1, detection.y1),
@@ -296,18 +336,14 @@ class Processor:
             thickness=2,
         )
 
-        # Переводим в PIL для отрисовки текста с кириллицей
         img_pil = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
         draw = ImageDraw.Draw(img_pil)
 
-        # Размер текста для фона под подпись
         bbox = draw.textbbox((0, 0), label, font=self.font)
         text_w = bbox[2] - bbox[0]
         text_h = bbox[3] - bbox[1]
         padding = 4
 
-        # Фон под текст — того же цвета что рамка
-        # PIL использует RGB, переворачиваем BGR
         rgb_color = (color[2], color[1], color[0])
         bg_x1 = detection.x1
         bg_y1 = max(0, detection.y1 - text_h - padding * 2)
@@ -315,15 +351,13 @@ class Processor:
         bg_y2 = detection.y1
         draw.rectangle([bg_x1, bg_y1, bg_x2, bg_y2], fill=rgb_color)
 
-        # Текст поверх фона
         draw.text(
             (detection.x1 + padding, bg_y1 + padding // 2),
             label,
             font=self.font,
-            fill=(255, 255, 255),  # белый
+            fill=(255, 255, 255),
         )
 
-        # Переводим обратно в BGR для OpenCV
         return cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
 
     def _build_label(self, result: RecognitionResult | None) -> str:
