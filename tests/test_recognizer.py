@@ -1,8 +1,8 @@
 """
 test_recognizer.py
 ------------------
-Юнит-тесты для логики модуля recognizer.py.
-Тестируется постобработка текста и валидация номера — без запуска EasyOCR.
+Юнит-тесты для модуля recognizer.py.
+Тестируется конвертация латиницы в кириллицу и валидация номера.
 
 Запуск:
     pytest tests/test_recognizer.py -v
@@ -13,44 +13,39 @@ from src.recognizer import Recognizer, RU_PLATE_PATTERN
 
 
 def make_recognizer() -> Recognizer:
-    """Создаёт Recognizer, минуя __init__ (без загрузки EasyOCR)."""
+    """Создаёт Recognizer, минуя __init__ (без загрузки моделей)."""
     return Recognizer.__new__(Recognizer)
 
 
 # ---------------------------------------------------------------------------
-# Тесты _postprocess()
+# Тесты _to_cyrillic()
 # ---------------------------------------------------------------------------
 
-class TestPostprocess:
-    """Проверяем умную позиционную постобработку текста."""
+class TestToCyrillic:
+    """Проверяем конвертацию латиницы в кириллицу."""
 
     def setup_method(self):
         self.recognizer = make_recognizer()
 
-    def test_correct_full_plate(self):
+    def test_full_latin_plate(self):
         """Полный номер с латиницей — правильно конвертируется."""
-        assert self.recognizer._postprocess("A123BC456") == "А123ВС456"
+        assert self.recognizer._to_cyrillic("A123BC") == "А123ВС"
 
-    def test_digit_one_at_letter_position(self):
-        """Цифра 1 на позиции буквы — заменяется на Т."""
-        assert self.recognizer._postprocess("1505YH36") == "Т505УН36"
+    def test_digits_unchanged(self):
+        """Цифры не меняются."""
+        assert self.recognizer._to_cyrillic("123") == "123"
 
-    def test_ruble_sign_replaced(self):
-        """Знак рубля на позиции буквы — заменяется на Р."""
-        assert self.recognizer._postprocess("₽986YX36") == "Р986УХ36"
-
-    def test_letter_o_at_digit_position(self):
-        """Буква О на позиции цифры — заменяется на 0."""
-        assert self.recognizer._postprocess("АО23ВС45") == "А023ВС45"
+    def test_mixed_latin_and_digits(self):
+        """Латиница конвертируется, цифры остаются."""
+        assert self.recognizer._to_cyrillic("X888XX01") == "Х888ХХ01"
 
     def test_empty_string(self):
         """Пустая строка остаётся пустой."""
-        assert self.recognizer._postprocess("") == ""
+        assert self.recognizer._to_cyrillic("") == ""
 
-    def test_short_string_returned_as_is(self):
-        """Короткая строка — возвращается без позиционной обработки."""
-        result = self.recognizer._postprocess("АВС")
-        assert len(result) <= 3
+    def test_all_allowed_letters(self):
+        """Все разрешённые латинские буквы конвертируются в кириллицу."""
+        assert self.recognizer._to_cyrillic("ABEKMHOPCTYX") == "АВЕКМНОРСТУХ"
 
 
 # ---------------------------------------------------------------------------

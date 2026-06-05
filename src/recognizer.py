@@ -46,9 +46,8 @@ LATIN_TO_CYRILLIC = {
 # Разрешённые кириллические буквы в российских номерах
 ALLOWED_CHARS = "АВЕКМНОРСТУХ"
 
-# Regex-шаблон российского номера
 RU_PLATE_PATTERN = re.compile(
-    rf"^[{ALLOWED_CHARS}]{{1}}\d{{3}}[{ALLOWED_CHARS}]{{2}}(\d{{2,3}})?$"
+    rf"^[{ALLOWED_CHARS}]{{1}}\d{{3}}[{ALLOWED_CHARS}]{{2}}\d{{2,3}}$"
 )
 
 
