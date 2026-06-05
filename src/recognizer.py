@@ -36,7 +36,7 @@ LETTER_SUBSTITUTIONS = {
     "0": "О", "1": "Т", "3": "З", "4": "А",
     "6": "Б", "8": "В",
     # Знак рубля → Р
-    "₽": "Р",
+    "₽": "Р", "I": "Т", "7": "Т", "J": "Т", "Д": "Д",  # оставляем — валидация всё равно отклонит
 }
 
 # Замены для позиций где должна быть ЦИФРА.
@@ -209,44 +209,25 @@ class Recognizer:
         return merged, avg_confidence
 
     def _postprocess(self, text: str) -> str:
-        """
-        Очищает и нормализует распознанный текст.
-
-        Применяет умную позиционную постобработку — разные таблицы замен
-        для букв и цифр в зависимости от позиции в номере.
-
-        Структура российского номера: Б 999 ББ 999
-        Позиции: 0=буква, 1-3=цифры, 4-5=буквы, 6-8=цифры региона
-
-        Args:
-            text: сырой текст от EasyOCR
-
-        Returns:
-            Нормализованная строка.
-        """
-        # Убираем всё кроме букв, цифр и знака рубля (₽ путают с Р)
         text = re.sub(r"[^А-ЯA-Z0-9а-яa-zЁё₽]", "", text)
-
-        # Приводим к верхнему регистру
         text = text.upper()
 
-        # Если строка слишком короткая — возвращаем как есть
         if len(text) < 6:
             return text
 
-        # Позиции букв и цифр в российском номере
-        # Б 9 9 9 Б Б 9 9 [9]
-        # 0 1 2 3 4 5 6 7 [8]
         LETTER_POSITIONS = {0, 4, 5}
-        DIGIT_POSITIONS  = {1, 2, 3, 6, 7, 8}
+        DIGIT_POSITIONS = {1, 2, 3, 6, 7, 8}
 
         result = ""
         for i, char in enumerate(text):
             if i in LETTER_POSITIONS:
-                result += LETTER_SUBSTITUTIONS.get(char, char)
+                mapped = LETTER_SUBSTITUTIONS.get(char, char)
+                result += mapped
             elif i in DIGIT_POSITIONS:
                 result += DIGIT_SUBSTITUTIONS.get(char, char)
             else:
                 result += char
 
-        return result
+        # Российский номер максимум 9 символов (А123ВС456)
+        # Всё лишнее — мусор от рекламных рамок и наклеек
+        return result[:9]
