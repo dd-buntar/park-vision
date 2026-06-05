@@ -4,6 +4,7 @@ env/
 
 # Веса моделей
 models/*.onnx
+models/*.ckpt
 output/
 testvideos/
 testimages/

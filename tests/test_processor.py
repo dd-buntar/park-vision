@@ -43,6 +43,7 @@ def make_processor(tmp_path: Path) -> Processor:
         recognizer=fake_recognizer,
         csv_path=csv_path,
         output_dir=output_dir,
+        save_all=True,
     )
 
 
@@ -153,7 +154,7 @@ class TestAnnotateFrame:
 
         # patch перехватывает write_plate и считает сколько раз она вызвана
         with patch("src.processor.write_plate") as mock_write:
-            processor._annotate_frame(frame, detections, source="test.mp4")
+            processor._annotate_frame(frame, detections, source="test.mp4", frame_number=0)
             mock_write.assert_called_once()
 
     def test_invalid_plate_not_written_to_csv(self, tmp_path: Path):
@@ -172,7 +173,7 @@ class TestAnnotateFrame:
         frame = np.zeros((480, 640, 3), dtype=np.uint8)
 
         with patch("src.processor.write_plate") as mock_write:
-            processor._annotate_frame(frame, detections, source="test.mp4")
+            processor._annotate_frame(frame, detections, source="test.mp4", frame_number=0)
             mock_write.assert_not_called()
 
     def test_low_confidence_plate_not_written_to_csv(self, tmp_path: Path):
@@ -191,5 +192,5 @@ class TestAnnotateFrame:
         frame = np.zeros((480, 640, 3), dtype=np.uint8)
 
         with patch("src.processor.write_plate") as mock_write:
-            processor._annotate_frame(frame, detections, source="test.mp4")
+            processor._annotate_frame(frame, detections, source="test.mp4", frame_number=0)
             mock_write.assert_not_called()
